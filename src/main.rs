@@ -569,6 +569,13 @@ fn main() -> io::Result<()> {
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("update") {
+        // andy-mux is rebuilt from each herdr release by its own CI; herdr's updater would
+        // replace it with stock herdr.
+        platform::begin_cli_output();
+        println!("andy-mux updates come from https://github.com/andymsun/andy-mux/releases (or `andy update`).");
+        if true {
+            return Ok(());
+        }
         let options = match update::parse_self_update_args(&args[2..]) {
             Ok(options) => options,
             Err(err) if err.starts_with("usage:") => {
