@@ -1,0 +1,117 @@
+# andy-mux: herdr plus a small patch series (the commits on this branch after the herdr tag it
+# sits on). Daily, and on demand, this moves the series onto herdr's newest release tag, builds
+# and tests it, and publishes a release. If the series no longer applies or the build or tests
+# fail, it opens (or updates) an issue and publishes nothing, so the last good release stays the
+# one to install.
+name: andy-mux
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build and release even if the series is already on the newest tag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: andy-mux
+  cancel-in-progress: false
+
+jobs:
+  rebase-build-release:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Every gh call names this repo: the checkout also has herdr as a remote, and gh would
+      # otherwise act on herdr itself.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: andy
+          fetch-depth: 0
+
+      - name: find the base and the newest herdr tag
+        id: tags
+        run: |
+          git remote add upstream https://github.com/herdrdev/herdr.git
+          git fetch --quiet upstream --tags
+          newest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          base=""
+          for t in $(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
+            if git merge-base --is-ancestor "$t" HEAD; then base=$t; break; fi
+          done
+          echo "newest=$newest" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          if gh release view -R "$GITHUB_REPOSITORY" "andy-$newest" >/dev/null 2>&1 && [ "$newest" = "$base" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "base $base, newest $newest"
+
+      - name: move the patch series onto the newest tag
+        if: steps.tags.outputs.skip != 'true' && steps.tags.outputs.base != steps.tags.outputs.newest
+        run: |
+          git config user.name "andy-mux ci"
+          git config user.email "andy-mux-ci@users.noreply.github.com"
+          git rebase --onto "${{ steps.tags.outputs.newest }}" "${{ steps.tags.outputs.base }}" andy
+
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.tags.outputs.skip != 'true'
+        with:
+          toolchain: "1.96.1"
+
+      - name: install zig (libghostty-vt needs 0.16.0)
+        if: steps.tags.outputs.skip != 'true'
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: build
+        if: steps.tags.outputs.skip != 'true'
+        run: cargo build --release --locked
+
+      - name: install cargo-nextest
+        if: steps.tags.outputs.skip != 'true'
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: cargo-nextest
+
+      # herdr's own macOS CI: nextest, debug build (tests expect the herdr-dev config dir), without
+      # the live handoff binary. Plain `cargo test`
+      # breaks listing tests.
+      - name: test
+        if: steps.tags.outputs.skip != 'true'
+        run: cargo nextest run --locked --no-fail-fast -E 'not binary(live_handoff)' --status-level fail --final-status-level fail --failure-output final --success-output never
+
+      - name: smoke test
+        if: steps.tags.outputs.skip != 'true'
+        run: |
+          ./target/release/herdr --version | tee /dev/stderr | grep -q '^andy-mux '
+          ./target/release/herdr update | grep -q 'andy-mux/releases'
+
+      - name: publish
+        if: steps.tags.outputs.skip != 'true'
+        run: |
+          tag="andy-${{ steps.tags.outputs.newest }}"
+          mkdir -p dist && cp target/release/herdr dist/andy-mux
+          tar -C dist -czf "andy-mux-${{ steps.tags.outputs.newest }}-macos-arm64.tar.gz" andy-mux
+          shasum -a 256 andy-mux-*.tar.gz > SHA256SUMS
+          git push --force-with-lease origin andy
+          gh release delete -R "$GITHUB_REPOSITORY" "$tag" --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create -R "$GITHUB_REPOSITORY" "$tag" andy-mux-*.tar.gz SHA256SUMS --target andy \
+            --title "andy-mux ${{ steps.tags.outputs.newest }}" \
+            --notes "herdr ${{ steps.tags.outputs.newest }} with the andy-mux patch series."
+
+      - name: report a failure
+        if: failure()
+        run: |
+          title="andy-mux: herdr ${{ steps.tags.outputs.newest }} needs attention"
+          body="The run at ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} could not move the patch series from ${{ steps.tags.outputs.base }} to ${{ steps.tags.outputs.newest }}, or the build or tests failed. The last good release is still the one to install."
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number -q '.[0].number')
+          if [ -n "$existing" ]; then gh issue comment -R "$GITHUB_REPOSITORY" "$existing" --body "$body"; else gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"; fi
