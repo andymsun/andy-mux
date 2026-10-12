@@ -1,13 +1,11 @@
 # andy-mux: herdr plus a small patch series (the commits on this branch after the herdr tag it
-# sits on). Daily, and on demand, this moves the series onto herdr's newest release tag, builds
+# sits on). On demand, this moves the series onto herdr's newest release tag, builds
 # and tests it, and publishes a release. If the series no longer applies or the build or tests
 # fail, it opens (or updates) an issue and publishes nothing, so the last good release stays the
 # one to install.
 name: andy-mux
 
 on:
-  schedule:
-    - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
       force:
